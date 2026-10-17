@@ -1,0 +1,422 @@
+
+<style>
+canvas { display: block; width: 100%; border-radius: 12px; }
+.ui-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 0 6px; }
+.ui-bar label { font-size: 13px; color: var(--color-text-secondary); }
+.stat-row { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 8px; margin-bottom: 8px; }
+.stat { background: var(--color-background-secondary); border-radius: 8px; padding: 8px 10px; }
+.stat .v { font-size: 17px; font-weight: 500; color: var(--color-text-primary); }
+.stat .l { font-size: 11px; color: var(--color-text-secondary); }
+.log { font-size: 12px; color: var(--color-text-secondary); font-family: monospace; height: 36px; overflow: hidden; margin-bottom: 6px; }
+</style>
+
+<div class="stat-row">
+  <div class="stat"><div class="v" id="sNesil">1</div><div class="l">Nesil</div></div>
+  <div class="stat"><div class="v" id="sGol">0</div><div class="l">Toplam gol</div></div>
+  <div class="stat"><div class="v" id="sOdul">0</div><div class="l">Ödül</div></div>
+  <div class="stat"><div class="v" id="sSkor">0</div><div class="l">En iyi</div></div>
+</div>
+<div class="log" id="logEl"></div>
+<canvas id="c"></canvas>
+<div class="ui-bar">
+  <label>Hız:</label>
+  <input type="range" min="1" max="10" step="1" value="3" id="spd" style="width:90px">
+  <span id="spdLbl" style="font-size:13px;color:var(--color-text-secondary);min-width:28px">3x</span>
+  <button id="btnReset">Sıfırla</button>
+  <button id="btnBoost">Turbo x10</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+function resize() {
+  W = canvas.parentElement.clientWidth || 600;
+  H = Math.round(W * 0.55);
+  canvas.width = W; canvas.height = H;
+}
+resize();
+
+let simSpeed = 3;
+let generation = 1;
+let totalGoals = 0;
+let bestScore = 0;
+let logs = [];
+let frameN = 0;
+
+function log(msg) {
+  logs.unshift(msg);
+  if (logs.length > 3) logs.pop();
+  document.getElementById('logEl').innerHTML = logs.map(l=>`<div>${l}</div>`).join('');
+}
+
+function r(a,b){return a+(b-a)*Math.random();}
+function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
+function sig(x){return 1/(1+Math.exp(-x));}
+
+const FIELD_W = 800, FIELD_H = 500;
+const GOAL_W = 80, GOAL_H = 100;
+const GOAL_X = FIELD_W - 30;
+const GOAL_Y1 = FIELD_H/2 - GOAL_H/2;
+const GOAL_Y2 = FIELD_H/2 + GOAL_H/2;
+
+class Brain {
+  constructor() { this.w = Array.from({length:30},()=>r(-1,1)); }
+  clone() { const b=new Brain(); b.w=[...this.w]; return b; }
+  mutate(rate) { this.w=this.w.map(v=>Math.random()<rate?v+r(-0.5,0.5):v); }
+  act(inp) {
+    const out=[];
+    for(let i=0;i<4;i++){
+      let s=0;
+      for(let j=0;j<inp.length;j++) s+=inp[j]*this.w[(i*7+j)%30];
+      out.push(sig(s));
+    }
+    return out;
+  }
+}
+
+class Agent {
+  constructor(brain) {
+    this.brain = brain;
+    this.reset();
+  }
+  reset() {
+    this.x = 100 + r(-20,20);
+    this.y = FIELD_H/2 + r(-60,60);
+    this.vx = 0; this.vy = 0;
+    this.score = 0;
+    this.alive = true;
+    this.touchTimer = 0;
+    this.age = 0;
+    this.goals = 0;
+    this.lastDist = 9999;
+    this.bobPhase = r(0, Math.PI*2);
+    this.flash = 0;
+    this.flashColor = '#fff';
+    this.squishX = 1; this.squishY = 1;
+  }
+  step(ball) {
+    if(!this.alive) return;
+    this.age++;
+    this.touchTimer++;
+    this.bobPhase += 0.12;
+
+    const dx = ball.x - this.x;
+    const dy = ball.y - this.y;
+    const dist = Math.sqrt(dx*dx+dy*dy);
+    const goalDx = GOAL_X - ball.x;
+    const goalDy = FIELD_H/2 - ball.y;
+    const goalDist = Math.sqrt(goalDx*goalDx+goalDy*goalDy);
+
+    const inp = [
+      dx/FIELD_W, dy/FIELD_H,
+      ball.vx/10, ball.vy/10,
+      goalDx/FIELD_W, goalDy/FIELD_H,
+      this.vx/8
+    ];
+    const out = this.brain.act(inp);
+
+    const spd = 3.2;
+    const ax = (out[0]-0.5)*spd;
+    const ay = (out[1]-0.5)*spd;
+    this.vx = clamp(this.vx*0.82+ax, -6, 6);
+    this.vy = clamp(this.vy*0.82+ay, -6, 6);
+    this.x = clamp(this.x+this.vx, 10, FIELD_W-10);
+    this.y = clamp(this.y+this.vy, 10, FIELD_H-10);
+
+    const speed = Math.sqrt(this.vx*this.vx+this.vy*this.vy);
+    this.squishX = 1 + speed*0.015;
+    this.squishY = 1 - speed*0.01;
+
+    if(dist < 28) {
+      this.touchTimer = 0;
+      const push = 5.5;
+      const nx = dx/dist, ny = dy/dist;
+      ball.vx = nx*push + (out[2]-0.5)*2;
+      ball.vy = ny*push + (out[3]-0.5)*2;
+      this.score += 5;
+      this.flash = 8; this.flashColor = '#ffe066';
+    }
+
+    if(this.touchTimer > 15*60) {
+      this.score -= 30;
+      this.flash = 10; this.flashColor = '#ff4444';
+      this.touchTimer = 0;
+    }
+
+    const newDist = Math.sqrt((ball.x-GOAL_X)**2+(ball.y-FIELD_H/2)**2);
+    if(newDist < this.lastDist) this.score += (this.lastDist-newDist)*0.05;
+    this.lastDist = newDist;
+
+    if(this.flash>0) this.flash--;
+  }
+}
+
+class Ball {
+  constructor() { this.reset(); }
+  reset() {
+    this.x = FIELD_W/2; this.y = FIELD_H/2;
+    this.vx = r(-1,1); this.vy = r(-1,1);
+    this.r = 14;
+    this.spin = 0;
+    this.angle = 0;
+  }
+  step() {
+    this.x += this.vx; this.y += this.vy;
+    this.vx *= 0.97; this.vy *= 0.97;
+    this.spin = this.vx * 0.3;
+    this.angle += this.spin;
+    if(this.x < this.r) { this.x=this.r; this.vx*=-0.7; }
+    if(this.x > FIELD_W-this.r) { this.x=FIELD_W-this.r; this.vx*=-0.7; }
+    if(this.y < this.r) { this.y=this.r; this.vy*=-0.7; }
+    if(this.y > FIELD_H-this.r) { this.y=FIELD_H-this.r; this.vy*=-0.7; }
+  }
+  isGoal() {
+    return this.x >= GOAL_X && this.y >= GOAL_Y1 && this.y <= GOAL_Y2;
+  }
+}
+
+const ISO = {
+  toScreen(fx, fy, fz, cx, cy) {
+    const scale = W / FIELD_W * 0.85;
+    const ix = (fx - fy) * 0.7 * scale + cx;
+    const iy = (fx + fy) * 0.35 * scale - fz * scale * 0.6 + cy;
+    return {x: ix, y: iy};
+  }
+};
+
+let agent, ball;
+let camX, camY;
+
+function initSim(brain) {
+  agent = new Agent(brain || new Brain());
+  ball = new Ball();
+  camX = W*0.5; camY = H*0.55;
+  frameN = 0;
+}
+
+function draw3DField() {
+  const corners = [
+    [0,0],[FIELD_W,0],[FIELD_W,FIELD_H],[0,FIELD_H]
+  ].map(([fx,fy])=>ISO.toScreen(fx,fy,0,camX,camY));
+
+  ctx.fillStyle = '#2d7a2d';
+  ctx.beginPath();
+  corners.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
+  ctx.closePath(); ctx.fill();
+
+  ctx.strokeStyle = '#3a9a3a'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  corners.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
+  ctx.closePath(); ctx.stroke();
+
+  for(let i=1;i<5;i++){
+    const fy = FIELD_H/5*i;
+    const p1=ISO.toScreen(0,fy,0,camX,camY);
+    const p2=ISO.toScreen(FIELD_W,fy,0,camX,camY);
+    ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); ctx.stroke();
+  }
+  const midP1=ISO.toScreen(FIELD_W/2,0,0,camX,camY);
+  const midP2=ISO.toScreen(FIELD_W/2,FIELD_H,0,camX,camY);
+  ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(midP1.x,midP1.y); ctx.lineTo(midP2.x,midP2.y); ctx.stroke();
+
+  const goalPosts = [
+    [GOAL_X, GOAL_Y1, 0],[GOAL_X, GOAL_Y2, 0],
+    [GOAL_X, GOAL_Y1, GOAL_H*0.5],[GOAL_X, GOAL_Y2, GOAL_H*0.5],
+    [GOAL_X+GOAL_W*0.5, GOAL_Y1, 0],[GOAL_X+GOAL_W*0.5, GOAL_Y2, 0],
+    [GOAL_X+GOAL_W*0.5, GOAL_Y1, GOAL_H*0.5],[GOAL_X+GOAL_W*0.5, GOAL_Y2, GOAL_H*0.5],
+  ];
+  const gp = goalPosts.map(([fx,fy,fz])=>ISO.toScreen(fx,fy,fz,camX,camY));
+  const lines=[[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7],[2,3],[6,7]];
+  ctx.strokeStyle='#ffffff'; ctx.lineWidth=2.5;
+  lines.forEach(([a,b])=>{
+    ctx.beginPath(); ctx.moveTo(gp[a].x,gp[a].y); ctx.lineTo(gp[b].x,gp[b].y); ctx.stroke();
+  });
+
+  ctx.fillStyle='rgba(255,255,255,0.06)';
+  ctx.beginPath();
+  ctx.moveTo(gp[2].x,gp[2].y); ctx.lineTo(gp[3].x,gp[3].y);
+  ctx.lineTo(gp[7].x,gp[7].y); ctx.lineTo(gp[6].x,gp[6].y);
+  ctx.closePath(); ctx.fill();
+}
+
+function draw3DAgent() {
+  const a = agent;
+  if(!a.alive) return;
+  const sz = 22;
+  const h = 28;
+  const bobZ = Math.sin(a.bobPhase) * 3;
+
+  const base = ISO.toScreen(a.x, a.y, bobZ, camX, camY);
+  const sx = a.squishX, sy = a.squishY;
+
+  const faceColor = a.flash>0 ? a.flashColor : '#5b9bf8';
+  const sideColor = a.flash>0 ? a.flashColor : '#2e5fd4';
+  const topColor  = a.flash>0 ? a.flashColor : '#7fb3ff';
+
+  const corners3D = [
+    [-sz*sx,-sz*sy,0],[sz*sx,-sz*sy,0],[sz*sx,sz*sy,0],[-sz*sx,sz*sy,0],
+    [-sz*sx,-sz*sy,h*sy],[sz*sx,-sz*sy,h*sy],[sz*sx,sz*sy,h*sy],[-sz*sx,sz*sy,h*sy],
+  ];
+  const pts = corners3D.map(([fx,fy,fz])=>{
+    const p = ISO.toScreen(a.x+fx*0.5, a.y+fy*0.5, fz+bobZ, camX, camY);
+    return p;
+  });
+
+  ctx.fillStyle=sideColor;
+  ctx.beginPath(); [4,5,1,0].forEach((i,j)=>j?ctx.lineTo(pts[i].x,pts[i].y):ctx.moveTo(pts[i].x,pts[i].y));
+  ctx.closePath(); ctx.fill();
+
+  ctx.fillStyle=faceColor;
+  ctx.beginPath(); [5,6,2,1].forEach((i,j)=>j?ctx.lineTo(pts[i].x,pts[i].y):ctx.moveTo(pts[i].x,pts[i].y));
+  ctx.closePath(); ctx.fill();
+
+  ctx.fillStyle=topColor;
+  ctx.beginPath(); [4,5,6,7].forEach((i,j)=>j?ctx.lineTo(pts[i].x,pts[i].y):ctx.moveTo(pts[i].x,pts[i].y));
+  ctx.closePath(); ctx.fill();
+
+  ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=1;
+  [[0,1],[1,2],[4,5],[5,6],[0,4],[1,5],[4,7],[5,6]].forEach(([a2,b])=>{
+    ctx.beginPath(); ctx.moveTo(pts[a2].x,pts[a2].y); ctx.lineTo(pts[b].x,pts[b].y); ctx.stroke();
+  });
+
+  const eyeBase = ISO.toScreen(a.x+sz*0.3, a.y-sz*0.4, h*0.75+bobZ, camX, camY);
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(eyeBase.x,eyeBase.y,4,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#1a1a2e'; ctx.beginPath(); ctx.arc(eyeBase.x+1,eyeBase.y,2,0,Math.PI*2); ctx.fill();
+
+  const smileY = eyeBase.y + 7;
+  ctx.strokeStyle='#fff'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.arc(eyeBase.x,smileY,4,0.2,Math.PI-0.2); ctx.stroke();
+
+  const shadow = ISO.toScreen(a.x, a.y, 0, camX, camY);
+  ctx.fillStyle='rgba(0,0,0,0.2)';
+  ctx.beginPath(); ctx.ellipse(shadow.x, shadow.y+4, sz*0.7, sz*0.25, 0, 0, Math.PI*2); ctx.fill();
+}
+
+function draw3DBall() {
+  const b = ball;
+  const bPos = ISO.toScreen(b.x, b.y, b.r, camX, camY);
+  const scale = W/FIELD_W * 0.85;
+  const screenR = b.r * scale * 0.9;
+
+  const shadow = ISO.toScreen(b.x, b.y, 0, camX, camY);
+  ctx.fillStyle='rgba(0,0,0,0.25)';
+  ctx.beginPath(); ctx.ellipse(shadow.x, shadow.y+3, screenR*1.1, screenR*0.4, 0, 0, Math.PI*2); ctx.fill();
+
+  ctx.fillStyle='#f0f0f0';
+  ctx.beginPath(); ctx.arc(bPos.x, bPos.y, screenR, 0, Math.PI*2); ctx.fill();
+
+  ctx.strokeStyle='#222'; ctx.lineWidth=1;
+  for(let i=0;i<5;i++){
+    const a2 = b.angle + i*Math.PI*2/5;
+    const px = bPos.x + Math.cos(a2)*screenR*0.5;
+    const py = bPos.y + Math.sin(a2)*screenR*0.5;
+    ctx.beginPath(); ctx.arc(px, py, screenR*0.28, 0, Math.PI*2); ctx.stroke();
+  }
+  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.arc(bPos.x, bPos.y, screenR, 0, Math.PI*2); ctx.stroke();
+}
+
+function drawUI() {
+  const td = Math.max(0, 15 - Math.floor(agent.touchTimer/60));
+  ctx.fillStyle = td < 5 ? 'rgba(255,80,80,0.85)' : 'rgba(0,0,0,0.55)';
+  ctx.beginPath(); ctx.roundRect(W-110,10,100,30,6); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.font='bold 13px sans-serif'; ctx.textAlign='center';
+  ctx.fillText(`Temas: ${td}s`, W-60, 30);
+
+  const rewardBar = clamp(agent.score/200, 0, 1);
+  ctx.fillStyle='rgba(0,0,0,0.5)';
+  ctx.beginPath(); ctx.roundRect(10,10,160,20,4); ctx.fill();
+  ctx.fillStyle=`hsl(${rewardBar*120},80%,50%)`;
+  ctx.beginPath(); ctx.roundRect(10,10,160*rewardBar,20,4); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.font='12px sans-serif'; ctx.textAlign='left';
+  ctx.fillText('Ödül: '+Math.round(agent.score), 14, 24);
+}
+
+let episodeCount = 0;
+let episodeBest = 0;
+
+function newEpisode() {
+  episodeCount++;
+  if(agent.score > episodeBest) { episodeBest = agent.score; }
+  if(agent.score > bestScore) bestScore = Math.round(agent.score);
+
+  const mutRate = Math.max(0.1, 0.5 - generation*0.015);
+  const newBrain = agent.brain.clone();
+  newBrain.mutate(mutRate);
+
+  if(episodeCount % 5 === 0) {
+    generation++;
+    document.getElementById('sNesil').textContent = generation;
+    log(`Nesil ${generation} - en iyi: ${bestScore}`);
+  }
+  document.getElementById('sSkor').textContent = bestScore;
+  initSim(newBrain);
+}
+
+function goalScored() {
+  totalGoals++;
+  agent.score += 500;
+  agent.goals++;
+  log(`GOL! Nesil ${generation} - toplam gol: ${totalGoals}`);
+  document.getElementById('sGol').textContent = totalGoals;
+  ball.reset();
+  agent.touchTimer = 0;
+}
+
+let lastTs = null;
+function loop(ts) {
+  const dtRaw = lastTs ? ts - lastTs : 16;
+  lastTs = ts;
+
+  ctx.clearRect(0,0,W,H);
+
+  ctx.fillStyle='#1a2a4a';
+  ctx.fillRect(0,0,W,H);
+
+  draw3DField();
+
+  for(let s=0;s<simSpeed;s++){
+    agent.step(ball);
+    ball.step();
+    if(ball.isGoal()) goalScored();
+    frameN++;
+    if(frameN > 1800) newEpisode();
+  }
+
+  draw3DBall();
+  draw3DAgent();
+  drawUI();
+
+  document.getElementById('sOdul').textContent = Math.round(agent.score);
+
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('spd').addEventListener('input',function(){
+  simSpeed=parseInt(this.value);
+  document.getElementById('spdLbl').textContent=simSpeed+'x';
+});
+document.getElementById('btnReset').addEventListener('click',function(){
+  generation=1; totalGoals=0; bestScore=0; episodeCount=0; episodeBest=0;
+  logs=[];
+  document.getElementById('logEl').innerHTML='';
+  document.getElementById('sNesil').textContent='1';
+  document.getElementById('sGol').textContent='0';
+  document.getElementById('sOdul').textContent='0';
+  document.getElementById('sSkor').textContent='0';
+  initSim(new Brain());
+  log('Sıfırlandı! Yeni beyin, sıfır deneyim.');
+});
+document.getElementById('btnBoost').addEventListener('click',function(){
+  simSpeed=10;
+  document.getElementById('spd').value=10;
+  document.getElementById('spdLbl').textContent='10x';
+});
+
+log('Eğitim başladı. AI futbol öğreniyor...');
+initSim();
+requestAnimationFrame(loop);
+</script>
